@@ -1,0 +1,546 @@
+---
+title: "Modello statistico per la previsione del peso neonatale"
+author: "Dario Colombo"
+output: html_document
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(qqplotr)
+library(ggpubr)
+library(moments)
+library(car)
+library(dplyr)
+library(tidyr)
+```
+
+&nbsp;
+
+---
+
+&nbsp;
+
+## 1. Raccolta dei dati e struttura del dataset
+
+&nbsp;
+
+```{r, message=FALSE, warning=FALSE}
+# Caricamento del dataset
+df <-read.csv(
+  "neonati.csv",
+  stringsAsFactors = T
+)
+#https://raw.githubusercontent.com/cdario79/ModelloPesoNeonatale/refs/heads/main/neonati.csv
+```
+
+```{r, echo=FALSE,message=FALSE, warning=FALSE}
+set.seed(174)
+kable(head(df, 10),) %>%
+  kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover"))
+```
+
+&nbsp;
+
+```{r, echo=FALSE, message=FALSE, warnign=FALSE}
+
+knitr::asis_output(
+  
+  paste0(
+    "<h4><strong>Dimensioni del Dataset:</strong> ", nrow(df), " righe x ", ncol(df), " colonne</h4>
+  ")
+  
+)
+
+glimpse_info <- data.frame(
+  Tipo = sapply(df, class),  # Tipo di dato
+  Esempi = sapply(df, function(x) paste(head(x, 3), collapse = ", "))  # Mostra i primi 3 valori
+)
+
+kable(glimpse_info, caption = "**Struttura del dataset**") %>%
+  kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover"))
+```
+
+```{r, echo=FALSE,message=FALSE, warnign=FALSE}
+attach(df)
+```
+
+#### Anni.madre  
+Età della madre *(in anni)*  
+**Tipo:** Quantitativa discreta in scala di rapporti  
+
+#### N.gravidanze  
+Quante gravidanze ha avuto la madre<br/>
+*teniamo conto che 0 indica che è alla prima gravidanza ma non ha mai partorito prima*<br/>
+**Tipo:** Quantitativa discreta in scala di rapporti  
+
+#### Fumatrici <sup style="color:red">(1)</sup>  
+Se la mamma fuma *(0=non fumatrice, 1=fumatrice)* <br/>
+**Tipo:** Qualitativa dicotomica  
+
+#### Gestazione  
+Durata della gravidanza *(in settimane)*  
+**Tipo:** Quantitativa continua in scala di rapporti
+
+#### Peso => **VARIABILE TARGET** 
+Peso del neonato *(in grammi)*  
+**Tipo:** Quantitativa continua in scala di rapporti 
+
+#### Lunghezza  
+Lunghezza del neonato *(in millimetri)*  
+**Tipo:** Quantitativa continua in scala di rapporti 
+
+#### Cranio <sup style="color:red">(2)</sup> 
+Circonferenza del cranio *(in millimetri)* e non diametro del cranio<br/>
+**Tipo:** Quantitativa continua in scala di rapporti 
+
+#### Tipo.parto <sup style="color:red">(3)</sup> 
+Tipo di parto *(Nat = Naturale, Ces = Cesareo)*  
+**Tipo:** Qualitativa nominale  
+
+#### Ospedale <sup style="color:red">(4)</sup> 
+Ospedale di nascita *(osp1, osp2, osp3)*  
+**Tipo:** Qualitativa nominale  
+
+#### Sesso  
+Sesso del neonato *(M = Maschio, F = Femmina)*  
+**Tipo:** Qualitativa dicotomica  
+
+&nbsp;
+
+---
+
+&nbsp;
+
+## 2. Analisi e modellizzazione
+
+&nbsp;
+
+```{r}
+analyze_quantitative <- function(data, var_name) {
+  var <- data[[var_name]]
+  
+  # Rimozione dei valori NA
+  var <- na.omit(var)
+  
+  # Calcolo delle statistiche descrittive
+  min_val <- min(var, na.rm = TRUE)
+  mean_val <- mean(var, na.rm = TRUE)
+  max_val <- max(var, na.rm = TRUE)
+  q1_val <- quantile(var, 0.25, na.rm = TRUE)
+  median_val <- median(var, na.rm = TRUE)
+  q3_val <- quantile(var, 0.75, na.rm = TRUE)
+  iqr_val <- IQR(var, na.rm = TRUE)
+  
+  # Limiti IQR per identificare outlier
+  lower_bound <- q1_val - 1.5 * iqr_val
+  upper_bound <- q3_val + 1.5 * iqr_val
+  outliers <- var[var < lower_bound | var > upper_bound]
+  
+  # Skewness e Kurtosis
+  skewness_val <- skewness(var, na.rm = TRUE)
+  kurtosis_val <- kurtosis(var, na.rm = TRUE) - 3
+  
+  # Test di Shapiro-Wilk
+  shapiro_test <- shapiro.test(var)
+  
+  # Creazione del dataframe con i risultati
+  results <- data.frame(
+    Misura = c("Min", "Media", "Max", "Q1", "Mediana", "Q3", "IQR", 
+               "Limite Inf. IQR", "Limite Sup. IQR", "Skewness", "Kurtosis", 
+               "Shapiro-Wilk W", "Shapiro-Wilk p-value", "Numero Outlier"),
+    Valore = c(min_val, mean_val, max_val, q1_val, median_val, q3_val, iqr_val, 
+               lower_bound, upper_bound, skewness_val, kurtosis_val, 
+               shapiro_test$statistic, shapiro_test$p.value, length(outliers))
+  )
+  
+  # Palette di blu
+  blue_palette <- c("#1f78b4", "#a6cee3", "#08519c", "#3182bd", "#6baed6", "#9ecae1", "#c6dbef")
+
+  # Grafico della distribuzione con istogramma e densità normale
+  dist_plot <- ggplot(data, aes(x = .data[[var_name]])) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = blue_palette[1], color = "black", alpha = 0.7) + 
+    geom_density(aes(color = "Dati Osservati"), linewidth = 1, color = blue_palette[3]) +
+    labs(
+      title = paste("Distribuzione di", var_name),
+      x = var_name, y = "Densità"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom") +
+    guides(color = guide_legend(title = NULL))
+  
+  # Boxplot per identificazione outlier
+  box_plot <- ggplot(data, aes(y = .data[[var_name]])) +
+    geom_boxplot(fill = blue_palette[2], alpha = 0.7, color = blue_palette[4], outlier.color = "red", outlier.shape = 16) +
+    labs(title = paste("Boxplot di", var_name), y = var_name) +
+    theme_minimal()
+  
+  # Visualizzazione degli outlier
+  outliers_plot <- ggplot(data, aes(x = 1, y = .data[[var_name]])) +
+    geom_jitter(width = 0.1, color = blue_palette[6]) +
+    geom_hline(yintercept = lower_bound, linetype = "dashed", color = "red") +
+    geom_hline(yintercept = upper_bound, linetype = "dashed", color = "red") +
+    labs(title = paste("Outlier di", var_name), x = "", y = var_name) +
+    theme_minimal()
+  
+  # Tabella degli outlier
+  outlier_df <- data[data[[var_name]] < lower_bound | data[[var_name]] > upper_bound, ]
+  
+  # Visualizzazione della tabella delle statistiche
+  print(
+    kbl(results, format = "html", align = "c", caption = paste("Statistiche di", var_name)) %>%
+      kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover", "condensed"))
+  )
+  
+  # Mostrare i grafici
+  print(dist_plot)
+  print(box_plot)
+  print(outliers_plot)
+  
+  # Visualizzo tabella degli outlier
+  if (nrow(outlier_df) > 0) {
+    
+    extreme_outliers <- rbind(
+      head(outlier_df[order(outlier_df[[var_name]]), ], 5),  # 5 più bassi
+      tail(outlier_df[order(outlier_df[[var_name]]), ], 5)   # 5 più alti
+    )
+    
+    # Trova il numero della colonna corrispondente alla variabile di interesse
+    col_index <- which(colnames(extreme_outliers) == var_name)
+    
+    # Creazione della tabella con colonna evidenziata
+    print(
+      kbl(extreme_outliers, format = "html", caption = paste("Outlier estremi di", var_name)) %>%
+        kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+        column_spec(col_index + 1, background = "#a6cee3", bold = TRUE)  # Sfondo giallo evidenziato
+    )
+    
+  } else {
+    print("Nessun outlier rilevato.")
+  }
+
+  return(list(Outliers = outlier_df, Test_Statistici = results))
+
+}
+```
+
+```{r}
+analyze_qualitative <- function(data, var_name) {
+  var <- na.omit(data[[var_name]])
+  
+  # Creazione della tabella di frequenza con percentuali
+  freq_table <- as.data.frame(table(var))
+  colnames(freq_table) <- c("Categoria", "Frequenza")  # Rinominare correttamente
+  freq_table$Percentuale <- round(100 * freq_table$Frequenza / sum(freq_table$Frequenza), 2)
+  
+  # Test del Chi-quadro per verificare la distribuzione uniforme
+  chi_test <- chisq.test(freq_table$Frequenza)
+  
+  # Se binaria, test binomiale per equilibrio
+  if (nrow(freq_table) == 2) {
+    binom_test <- binom.test(freq_table$Frequenza[1], sum(freq_table$Frequenza))
+    binom_pvalue <- binom_test$p.value
+  } else {
+    binom_pvalue <- NA
+  }
+  
+  # Gradazioni di blu per i grafici
+  blue_palette <- c("#1f78b4","#1f78b4","#1f78b4","#1f78b4")
+  
+  # Grafico a barre con percentuali
+  bar_plot <- ggplot(freq_table, aes(x = Categoria, y = Frequenza, fill = Categoria)) +
+    geom_bar(stat = "identity", alpha = 0.8) +
+    geom_text(aes(label = paste0(Percentuale, "%")), vjust = -0.3, size = 4, color = "black") +
+    scale_fill_manual(values = blue_palette[1:length(unique(freq_table$Categoria))]) +  # Usa i colori blu
+    labs(title = paste("Distribuzione di", var_name), x = var_name, y = "Frequenza") +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  # Tabella dei risultati statistici
+  test_results <- data.frame(
+    Test = c("Chi-quadro", "Test binomiale"),
+    P_value = c(chi_test$p.value, binom_pvalue)
+  )
+  
+  # Stampa della tabella di frequenza
+  print(
+    kbl(freq_table, format = "html", caption = paste("Tabella delle Frequenze di", var_name)) %>%
+      kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover", "condensed"))
+  )
+  
+  # Stampa della tabella dei test statistici
+  print(
+    kbl(test_results, format = "html", caption = "Risultati dei Test Statistici") %>%
+      kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover", "condensed"))
+  )
+  
+  # Mostra i grafici
+  print(bar_plot)
+  
+  return(list(Frequenze = freq_table, Test_Statistici = test_results))
+}
+```
+
+
+&nbsp;
+
+### Analisi preliminare
+
+&nbsp;
+
+#### Analisi di "**Anni.madre**"
+
+```{r, fig.width=12, fig.height=6, out.width="100%", message=FALSE, warning=FALSE, results='asis'}
+anni_madre_df <- analyze_quantitative(df, "Anni.madre")
+```
+
+La variabile segue una distribuzione leggermenete assimmetrica con code meno pronucniate rispetto ad una distribuzione normale. Il testo di Shapiro-Wilk indica che la distribuzione non è normale, ma dall'istrogramma della distribuzione la forma ricorda la distribuzione normale percui potremmo per ora considerare la distribuzione come normale e fare ulteriori analisi successivamente per vedere l'influenza sul modello.
+
+Analizzando gli outlier possiamo vedere valori molto bassi di 0, 1, 13, 14 anni e valori più alti di 44, 45, 46 anni.
+
+I valori 0 e 1 sono valori chiaramente anomali dovuto quasi sicuramente a errori di inserimento.
+
+I valori di 13 e 14 anni <sup style="color:red">(5)</sup>, sono valori plausibili anche se gravidanze a queste giovane età posso comportare maggiori rischi a causa di complicanze.
+
+I valori di 44, 45 e 46 anni sono valori plausibili <sup style="color:red">(6)</sup> e sta diventando sempre più anche grazie ai progressi della medicina riproduttiva.
+
+Sulla base di questo decido di sostituire i valori 0 e 1 con la mediana delle età delle madri per evitare di elinminarli e perdere informazione e di tenere gli altri valori in quando plausibili e necessari per mantenere significativo il dataset.
+
+&nbsp;
+
+#### Analisi di "**N.gravidanze**"
+
+&nbsp;
+
+```{r, fig.width=12, fig.height=6, out.width="100%", message=FALSE, warning=FALSE, results='asis'}
+gravidanze_df <- analyze_quantitative(df, "N.gravidanze")
+```
+
+La distribuzione è molto assimmetrica a desta con una coda lunga e con molti valori outlier, questo significa che meno di 3 gravidanze e un dato comune, invece più di 3 gravidanze sono casi piuttosto rari che rappresntano circa il 10% dei casi totali.
+
+
+&nbsp;
+
+#### Analisi di "**Fumatrici**"
+
+&nbsp;
+
+```{r, fig.width=12, fig.height=6, out.width="100%", message=FALSE, warning=FALSE, results='asis'}
+fumatrici_df <- analyze_qualitative(df, "Fumatrici")
+```
+
+Nel nostro campione le madri Fumatrici rappresentano circa il 4% rendendo questa distribuzione molto sbilanciata e potrebbe non essere correttamente rappresentativa nel modello.
+
+Ma considerando che la media sulla popolazione sarebbe intorno al 10%  <sup style="color:red">(1)</sup>  questo permetterebbe di ottenere risultati più significativi e affidabili per il modello, indicando che probabilmente è il nostro campione a non essere perfettamente bilanciato.
+
+&nbsp;
+
+#### Analisi di "**Gestazione**"
+
+&nbsp;
+
+```{r, fig.width=12, fig.height=6, out.width="100%", message=FALSE, warning=FALSE, results='asis'}
+gestazione_df <- analyze_quantitative(df, "Gestazione")
+```
+
+Le gravidanze durano dalle 25 alle 43 settimane, con un media di 39 settimane che si attesta vicino alla durata tipica di una gravidanza che è di 40 settimane. Sono presenti diversi outlier sopratutto sotto le 35 settimane che identificano i parti prematuri.
+
+&nbsp;
+
+#### Analisi di "**Peso**"
+
+&nbsp;
+
+```{r, fig.width=12, fig.height=6, out.width="100%", message=FALSE, warning=FALSE, results='asis'}
+peso_df <- analyze_quantitative(df, "Peso")
+```
+
+&nbsp;
+
+Siccome il peso medio e il peso mediano hanno valori abbastanza simili in generale la maggior parte dei neonati da un peso introno a questi valori ma con alcuni neonati che hanno peso significativamente più bassi che potrebbe dipendere da nascite premature o condiczione che influenzano la crescita del feto.
+
+&nbsp;
+
+#### Analisi di "**Lunghezza**"
+
+&nbsp;
+
+```{r, fig.width=12, fig.height=6, out.width="100%", message=FALSE, warning=FALSE, results='asis'}
+lunghezza_df <- analyze_quantitative(df, "Lunghezza")
+```
+
+La distribuzione è assimetrica con prevalenza di valori più bassi. I valori più bassi si possono riferire ai parti prematuri, mentre quelli più alti potrebbero essere errori di muisurazione o casi particolari rari.
+
+&nbsp;
+
+#### Analisi di "**Cranio**"
+
+&nbsp;
+
+```{r, fig.width=12, fig.height=6, out.width="100%", message=FALSE, warning=FALSE, results='asis'}
+cranio_df <- analyze_quantitative(df, "Cranio")
+```
+
+&nbsp;
+
+#### Analisi di "**Sesso**"
+
+&nbsp;
+
+```{r, fig.width=12, fig.height=6, out.width="100%", message=FALSE, warning=FALSE, results='asis'}
+seeso_df <- analyze_qualitative(df, "Sesso")
+```
+
+&nbsp;
+
+### Creazione del Modello di Regressione
+
+&nbsp;
+
+#### Analisi della correlazione tra le variabili
+
+```{r fig.width=12, fig.height=12, out.width="100%", message=FALSE, warning=FALSE}
+# Creazione matrice di correlazione con scatterplot
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
+    {
+      par(usr = c(0, 1, 0, 1))
+      r <- abs(cor(x, y))
+      txt <- format(c(r, 0.123456789), digits = digits)[1]
+      txt <- paste0(prefix, txt)
+      if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+      text(0.5, 0.5, txt, cex = 1.5)
+    }
+    pairs(df,upper.panel = panel.smooth, lower.panel = panel.cor)
+```
+
+&nbsp;
+
+**Considerazioni:**
+
+- La correlazione tra **Peso** e **Lunghezza** risulta elevato(0.80) e questo suggerisce che i neonati più lunghi tendono ad avere un peso maggiore.
+- La correlazione tra **Peso** e **Gestazione** alto me meno forte di quello precedente (0.59)ma permette di sostenere che una gestazione più lunga tende ad aumentare il peso alla nascita.
+- La correlazione tra **Lunghezza** e **Cranio** è alta (0.60), come ci si attende per due variabili antropometriche che mappano la crescita fetale.
+- La correlazione tra **Peso** e **Cranio** è alta (0.70), come ci si attende per due variabili antropometriche che mappano la crescita fetale.
+- **Durata della gestazione** mostra una distribuzione concentrata intorno alle 40 settimane che è il valore atteso per una gravidanza a termine.
+- **Fumatrici** e **Peso** hanno una bassa correlazione (0.032) ma potrebbero esserci effetti indiretti non subito evidenti che valuteremo nel proseguo dell'analisi.
+
+&nbsp;
+
+
+
+
+
+
+
+
+&nbsp;
+
+In base a quanto indicato nella nota **1** (vedi in fondo alla pagina), mantengo nel dataset la variabile **Fumatrici** in quanto sembrerebbe essere significativa per determinare il peso del neonato alla nascita.
+
+In base a quanto indicato nel note **3** e **4** (vedi in fondo alla pagina), posso escludere con cognizione dal modello e da ulteriori analisi le varibili **Tipo di parto** e **Ospedale** in quanto non significative per il nostro obbiettivo.
+
+```{r}
+# Rimuovere le colonne 'Ospedale' e 'Tipo.parto'
+df <- df[, !(names(df) %in% c("Ospedale", "Tipo.parto"))]
+```
+
+
+Procederò anche con la codifica della variabile **Sesso** in una variabile dummy con valori 0 e 1.
+
+```{r}
+# Convertire la variabile 'Sesso' in una variabile numerica dummy (0 = F, 1 = M)
+df$Sesso <- ifelse(df$Sesso == "M", 1, 0) 
+```
+
+&nbsp;
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+knitr::asis_output(
+  
+  paste0(
+    "<h4><strong>Dimensioni del Dataset dopo la prima analisi:</strong> ", nrow(df), " righe x ", ncol(df), " colonne</h4>
+  ")
+  
+)
+```
+
+```{r, echo=FALSE,message=FALSE, warning=FALSE}
+set.seed(174)
+kable(df[sample(nrow(df), 5), ], format = "html") %>%
+  kable_styling(full_width = TRUE)
+```
+
+---
+
+&nbsp;
+
+### NOTE
+
+&nbsp;
+
+<sup style="color:red">(1)</sup> **Impatto del fumo durante la gravidanza sul peso neonatale**: 
+
+- **Ministero della salute**: rischio di basso peso alla nascita come conseguenza della riduzione dell'apporto di ossigeno necessario per la corretta crescita del bambino. <br/>[FONTE: https://www.salute.gov.it/portale/fumo/dettaglioContenutiFumo.jsp?lingua=italiano&id=5583&area=fumo&menu=vuoto].
+- **Fondazione Alessandra Graziottin:** il fumo materno in gravidanza correla significativamente con il rischio di basso peso alla nascita (OR = 1.89, 95% CI = 1.80-1.98):
+  - OR = 1.89: il fumo aumenta il rischio di basso peso alla nascita di circa 89% rispetto alle non fumatrici.
+  - CI 95% = 1.80 - 1.98: conferma che l'associazione è forte e statisticamente significativa.
+  - Poiché il CI non include 1, l'effetto del fumo sul peso del neonato è quasi sicuramente reale e non dovuto al caso.
+  - [FONTE: https://www.fondazionegraziottin.org/it/articolo.php/Gravidanza-il-fumo-aumenta-il-rischio-di-basso-peso-alla-nascita?EW_CHILD=29894]
+- **Fondazione Umberto Veronesi:** fumare in gravidanza non pone a rischio soltanto la salute materna, ma pure quella del nascituro che, nel lungo periodo, rischia di sviluppare una capacità aerobica inferiore a quella dei coetanei nati da donne non fumatrici.    
+[FONTE: https://www.fondazioneveronesi.it/magazine/articoli/ginecologia/cosi-il-fumo-gravidanza-danneggia-il-bambino]
+- **Istituto Superiore di Sanità** riporta che circa il 10% delle donne in gravidanza in Italia ha dichiarato di fumare. [FONTE: https://www.epicentro.iss.it/sorveglianza02anni/indagine-2022-risultati]
+
+&nbsp;
+
+<sup style="color:red">(2)</sup> **Valori medi di un neonato alla nascita:**
+
+ho trovato un documento del reparto pediatrico del Polincino Gemelli di Roma che si dimostra una fonte autorevole [FONTE: https://pspediatrico.policlinicogemelli.it/wp-content/uploads/pdfScaricabili-12-2017/2-Esame_obiettivo_neonatale.pdf] il quale riporta che in media un neonato normale ha:
+
+- un peso di **3100-3400** grammi
+- una lunghezza di **48-52 cm**
+- una circonferenza cranica di **33-36 cm**
+
+il diametro del cranio dovrebbe essere tra 90 mm e 110 mm (9-11 cm), percui le misure presenti nel dataset si riferiscono alla circonferenza del cranio e non al diametro.
+
+&nbsp;
+
+<sup style="color:red">(3)</sup> **Impatto del tipo di parto sul peso neonatale**:
+
+Studi suggeriscono che il tipo di parto (naturale o cesareo) non è un determinante diretto del peso del neonato. Il cesareo viene spesso eseguito per motivi indipendenti dal peso (ad esempio, posizione del feto, sofferenza fetale, condizioni materne), il che rende questa variabile non causalmente legata al peso alla nascita.
+  
+**Fonti**:
+
+  - Kuhle et al., *Cesarean Delivery Is Not Associated with Obesity in Childhood*, The Journal of Pediatrics (2015).
+  - H. Blustein et al., *Association of caesarean delivery with offspring overweight and obesity: a systematic review and meta-analysis*, International Journal of Obesity (2013).
+
+&nbsp;
+
+<sup style="color:red">(4)</sup> **Impatto dell’ospedale sul peso neonatale**:
+
+Il peso neonatale è più influenzato da fattori materni e fetali (età della madre, durata della gestazione, fumo, condizioni mediche, ecc.) piuttosto che dal luogo di nascita. Le differenze tra ospedali sono spesso legate a differenze nella popolazione trattata o nei protocolli di assistenza, ma non rappresentano un fattore determinante diretto.
+ 
+**Fonti**:
+
+  - Kogan et al., *The Role of Clinical Practices in Variation in Birth Weight Among US Hospitals*, Maternal and Child Health Journal (2010).
+  - Kramer et al., *Determinants of low birth weight: Methodological assessment and meta-analysis*, Bulletin of the World Health Organization (1987).
+
+&nbsp;
+
+<sup style="color:red">(5)</sup> **Gravidanza in minorenni**:
+
+E' possibile che una ragazza di 13 o 14 anni rimanga incinta. La fertilità femminile inizia con la prima mestruazione, che in media si verifica intorno ai 12 anni. [FONTE: https://www.ospedalebambinogesu.it/gravidanza-in-minorenni-96849]
+
+&nbsp;
+
+<sup style="color:red">(6)</sup> **Gravidanza oltre i 40 anni**:
+
+Diventare mamma a 40 anni non è affatto strano, ma sta quasi diventando la normalità. [FONTE:https://imamma.it/gravidanza-a-40-anni-tutte-le-cose-da-sapere/?utm_source=chatgpt.com]
+
+&nbsp;
+
+&nbsp;
